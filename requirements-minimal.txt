@@ -1,0 +1,17 @@
+# Minimal requirements for initial setup and testing
+# Use this if the full requirements.txt has issues
+
+# Essential packages only
+pandas
+numpy
+python-dotenv
+azure-storage-blob
+azure-keyvault-secrets
+azure-identity
+requests
+PyYAML
+colorama
+
+# Build tools for Python 3.12
+setuptools
+wheel

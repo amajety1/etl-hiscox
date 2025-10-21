@@ -1,47 +1,51 @@
-# Core Python packages
-pandas==2.1.4
-numpy==1.24.3
-python-dotenv==1.0.0
+# Core Python packages (compatible with Python 3.12)
+pandas>=2.1.0
+numpy>=1.25.0
+python-dotenv>=1.0.0
 
-# Azure SDK packages
-azure-storage-blob==12.17.0
-azure-keyvault-secrets==4.7.0
-azure-identity==1.14.0
-azure-mgmt-databricks==1.0.0
+# Azure SDK packages (latest versions for Python 3.12 compatibility)
+azure-storage-blob>=12.19.0
+azure-keyvault-secrets>=4.8.0
+azure-identity>=1.15.0
+azure-mgmt-databricks>=1.1.0
 
-# Spark and Delta Lake
-pyspark==3.4.1
-delta-spark==2.4.0
+# Spark and Delta Lake (Python 3.12 compatible versions)
+pyspark>=3.5.0
+delta-spark>=3.0.0
 
-# dbt packages
-dbt-core==1.6.0
-dbt-databricks==1.6.0
+# dbt packages (latest for Python 3.12)
+dbt-core>=1.7.0
+dbt-databricks>=1.7.0
 
-# Data quality and validation
-great-expectations==0.17.23
-pydantic==1.10.12
+# Data quality and validation (Python 3.12 compatible)
+great-expectations>=0.18.0
+pydantic>=2.0.0
 
 # Utilities
-requests==2.31.0
-click==8.1.7
-PyYAML==6.0.1
-Jinja2==3.1.2
+requests>=2.31.0
+click>=8.1.0
+PyYAML>=6.0.0
+Jinja2>=3.1.0
 
 # Logging and monitoring
-structlog==23.1.0
-colorama==0.4.6
+structlog>=23.2.0
+colorama>=0.4.6
 
 # Development and testing
-pytest==7.4.0
-pytest-cov==4.1.0
-black==23.7.0
-flake8==6.0.0
-mypy==1.5.1
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=23.12.0
+flake8>=7.0.0
+mypy>=1.8.0
 
 # Jupyter for development
-jupyter==1.0.0
-notebook==7.0.2
+jupyter>=1.0.0
+notebook>=7.0.0
 
 # Additional utilities
-tqdm==4.65.0
-python-dateutil==2.8.2
+tqdm>=4.66.0
+python-dateutil>=2.8.0
+
+# Build tools (needed for Python 3.12)
+setuptools>=69.0.0
+wheel>=0.42.0
