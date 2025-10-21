@@ -1,0 +1,264 @@
+# Hiscox ETL Pipeline - Azure DevOps CI/CD Pipeline
+trigger:
+  branches:
+    include:
+    - main
+    - develop
+  paths:
+    exclude:
+    - README.md
+    - docs/*
+
+pr:
+  branches:
+    include:
+    - main
+    - develop
+
+variables:
+  - group: hiscox-etl-variables
+  - name: pythonVersion
+    value: '3.9'
+  - name: terraformVersion
+    value: '1.5.0'
+
+stages:
+- stage: Validate
+  displayName: 'Code Quality & Validation'
+  jobs:
+  - job: CodeQuality
+    displayName: 'Code Quality Checks'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
+    
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install black flake8 mypy pytest
+      displayName: 'Install dependencies'
+    
+    - script: |
+        black --check scripts/ --diff
+      displayName: 'Check Python formatting with Black'
+    
+    - script: |
+        flake8 scripts/ --max-line-length=88 --extend-ignore=E203,W503
+      displayName: 'Lint Python code with Flake8'
+    
+    - script: |
+        mypy scripts/ --ignore-missing-imports
+      displayName: 'Type check with MyPy'
+    
+    - script: |
+        pytest tests/ -v --cov=scripts --cov-report=xml
+      displayName: 'Run Python tests'
+      condition: succeededOrFailed()
+
+  - job: TerraformValidate
+    displayName: 'Terraform Validation'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: TerraformInstaller@0
+      inputs:
+        terraformVersion: '$(terraformVersion)'
+      displayName: 'Install Terraform'
+    
+    - script: |
+        cd terraform
+        terraform init -backend=false
+        terraform validate
+        terraform fmt -check
+      displayName: 'Validate Terraform configuration'
+
+  - job: DBTValidate
+    displayName: 'dbt Validation'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+    
+    - script: |
+        pip install dbt-core dbt-databricks
+      displayName: 'Install dbt'
+    
+    - script: |
+        cd dbt
+        dbt parse --profiles-dir . --project-dir .
+      displayName: 'Parse dbt models'
+
+- stage: Build
+  displayName: 'Build & Package'
+  dependsOn: Validate
+  condition: succeeded()
+  jobs:
+  - job: BuildContainers
+    displayName: 'Build Docker Containers'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: Docker@2
+      displayName: 'Build Python ETL Container'
+      inputs:
+        containerRegistry: '$(containerRegistryConnection)'
+        repository: 'hiscox-etl-python'
+        command: 'build'
+        Dockerfile: 'docker/python/Dockerfile'
+        tags: |
+          $(Build.BuildId)
+          latest
+    
+    - task: Docker@2
+      displayName: 'Build dbt Container'
+      inputs:
+        containerRegistry: '$(containerRegistryConnection)'
+        repository: 'hiscox-etl-dbt'
+        command: 'build'
+        Dockerfile: 'docker/dbt/Dockerfile'
+        tags: |
+          $(Build.BuildId)
+          latest
+    
+    - task: Docker@2
+      displayName: 'Push Python ETL Container'
+      inputs:
+        containerRegistry: '$(containerRegistryConnection)'
+        repository: 'hiscox-etl-python'
+        command: 'push'
+        tags: |
+          $(Build.BuildId)
+          latest
+    
+    - task: Docker@2
+      displayName: 'Push dbt Container'
+      inputs:
+        containerRegistry: '$(containerRegistryConnection)'
+        repository: 'hiscox-etl-dbt'
+        command: 'push'
+        tags: |
+          $(Build.BuildId)
+          latest
+
+- stage: DeployInfrastructure
+  displayName: 'Deploy Infrastructure'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployTerraform
+    displayName: 'Deploy Azure Infrastructure'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'hiscox-etl-production'
+    
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          - task: TerraformInstaller@0
+            inputs:
+              terraformVersion: '$(terraformVersion)'
+          
+          - task: AzureCLI@2
+            displayName: 'Deploy Infrastructure'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                cd terraform
+                terraform init \
+                  -backend-config="resource_group_name=$(terraformStateRG)" \
+                  -backend-config="storage_account_name=$(terraformStateSA)" \
+                  -backend-config="container_name=tfstate" \
+                  -backend-config="key=hiscox-etl.tfstate"
+                
+                terraform plan -out=tfplan \
+                  -var="storage_account_name=$(storageAccountName)" \
+                  -var="key_vault_name=$(keyVaultName)" \
+                  -var="databricks_workspace_name=$(databricksWorkspaceName)" \
+                  -var="container_registry_name=$(containerRegistryName)"
+                
+                terraform apply tfplan
+
+- stage: DeployETL
+  displayName: 'Deploy ETL Pipeline'
+  dependsOn: DeployInfrastructure
+  condition: succeeded()
+  jobs:
+  - deployment: DeployPipeline
+    displayName: 'Deploy ETL Pipeline'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'hiscox-etl-production'
+    
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          - task: AzureCLI@2
+            displayName: 'Deploy Pipeline Components'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Upload sample data to blob storage
+                az storage blob upload-batch \
+                  --destination raw-data \
+                  --source data/raw/ \
+                  --account-name $(storageAccountName) \
+                  --auth-mode login
+                
+                echo "✅ ETL Pipeline deployment completed successfully"
+
+- stage: Test
+  displayName: 'Integration Testing'
+  dependsOn: DeployETL
+  condition: succeeded()
+  jobs:
+  - job: IntegrationTests
+    displayName: 'Run Integration Tests'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+    
+    - script: |
+        pip install -r requirements.txt
+      displayName: 'Install dependencies'
+    
+    - task: AzureCLI@2
+      displayName: 'Run ETL Pipeline Test'
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Set environment variables
+          export AZURE_STORAGE_ACCOUNT_NAME=$(storageAccountName)
+          export DATABRICKS_HOST=$(databricksHost)
+          export DATABRICKS_TOKEN=$(databricksToken)
+          export KEY_VAULT_URL=$(keyVaultUrl)
+          
+          # Run integration test
+          python scripts/orchestrator.py
+          
+          echo "✅ Integration tests completed successfully"

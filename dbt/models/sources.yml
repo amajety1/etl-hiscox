@@ -1,0 +1,76 @@
+version: 2
+
+sources:
+  - name: raw
+    description: "Raw insurance data ingested from various source systems"
+    database: hive_metastore
+    schema: "{{ target.schema }}_bronze"
+    
+    tables:
+      - name: claims
+        description: "Raw claims data from the claims management system"
+        columns:
+          - name: claim_id
+            description: "Unique identifier for each claim"
+            tests:
+              - unique
+              - not_null
+          - name: policy_id
+            description: "Foreign key to the policy table"
+            tests:
+              - not_null
+          - name: customer_id
+            description: "Foreign key to the customer table"
+            tests:
+              - not_null
+          - name: claim_amount
+            description: "Total amount claimed by the customer"
+            tests:
+              - not_null
+          - name: claim_date
+            description: "Date when the claim was filed"
+            tests:
+              - not_null
+          - name: claim_type
+            description: "Type of claim (AUTO, HOME, LIFE, HEALTH, BUSINESS)"
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ['AUTO', 'HOME', 'LIFE', 'HEALTH', 'BUSINESS']
+          - name: claim_status
+            description: "Current status of the claim"
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ['OPEN', 'CLOSED', 'PENDING', 'REJECTED']
+
+      - name: policies
+        description: "Raw policies data from the policy management system"
+        columns:
+          - name: policy_id
+            description: "Unique identifier for each policy"
+            tests:
+              - unique
+              - not_null
+          - name: customer_id
+            description: "Foreign key to the customer table"
+            tests:
+              - not_null
+          - name: policy_type
+            description: "Type of policy (AUTO, HOME, LIFE, HEALTH, BUSINESS)"
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ['AUTO', 'HOME', 'LIFE', 'HEALTH', 'BUSINESS']
+          - name: premium_amount
+            description: "Annual premium amount"
+            tests:
+              - not_null
+          - name: start_date
+            description: "Policy start date"
+            tests:
+              - not_null
+          - name: policy_status
+            description: "Current status of the policy"
+            tests:
+              - not_null

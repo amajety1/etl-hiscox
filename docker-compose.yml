@@ -1,0 +1,109 @@
+version: '3.8'
+
+services:
+  # Python ETL Service
+  etl-python:
+    build:
+      context: .
+      dockerfile: docker/python/Dockerfile
+    container_name: hiscox-etl-python
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-dev}
+      - AZURE_STORAGE_ACCOUNT_NAME=${AZURE_STORAGE_ACCOUNT_NAME}
+      - AZURE_STORAGE_ACCOUNT_KEY=${AZURE_STORAGE_ACCOUNT_KEY}
+      - DATABRICKS_HOST=${DATABRICKS_HOST}
+      - DATABRICKS_TOKEN=${DATABRICKS_TOKEN}
+      - KEY_VAULT_URL=${KEY_VAULT_URL}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./scripts:/app/scripts
+    networks:
+      - hiscox-etl-network
+    depends_on:
+      - localstack
+    restart: unless-stopped
+
+  # dbt Service
+  etl-dbt:
+    build:
+      context: .
+      dockerfile: docker/dbt/Dockerfile
+    container_name: hiscox-etl-dbt
+    environment:
+      - DBT_PROFILES_DIR=/app/dbt
+      - DBT_PROJECT_DIR=/app/dbt
+      - DATABRICKS_HOST=${DATABRICKS_HOST}
+      - DATABRICKS_TOKEN=${DATABRICKS_TOKEN}
+      - DATABRICKS_HTTP_PATH=${DATABRICKS_HTTP_PATH}
+    volumes:
+      - ./dbt:/app/dbt
+      - ./logs:/app/logs
+    networks:
+      - hiscox-etl-network
+    depends_on:
+      - etl-python
+    restart: unless-stopped
+
+  # LocalStack for local Azure services emulation (development only)
+  localstack:
+    image: localstack/localstack:2.3
+    container_name: hiscox-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,secretsmanager
+      - DEBUG=1
+      - DATA_DIR=/tmp/localstack/data
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "./tmp/localstack:/tmp/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    networks:
+      - hiscox-etl-network
+    profiles:
+      - local-dev
+
+  # Jupyter Notebook for development and analysis
+  jupyter:
+    image: jupyter/pyspark-notebook:latest
+    container_name: hiscox-jupyter
+    ports:
+      - "8888:8888"
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=hiscox-etl-dev
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/work/data
+      - ./dbt:/home/jovyan/work/dbt
+    networks:
+      - hiscox-etl-network
+    profiles:
+      - local-dev
+
+  # MinIO for local S3-compatible storage (development only)
+  minio:
+    image: minio/minio:latest
+    container_name: hiscox-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin123
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./tmp/minio-data:/data
+    networks:
+      - hiscox-etl-network
+    profiles:
+      - local-dev
+
+networks:
+  hiscox-etl-network:
+    driver: bridge
+
+volumes:
+  minio-data:
+  localstack-data:

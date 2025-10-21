@@ -1,0 +1,108 @@
+# Name your project! Project names should contain only lowercase characters
+# and underscores. A good package name should reflect your organization's
+# name or the intended use of these models
+name: 'hiscox_etl'
+version: '1.0.0'
+config-version: 2
+
+# This setting configures which "profile" dbt uses for this project.
+profile: 'hiscox_etl'
+
+# These configurations specify where dbt should look for different types of files.
+# The `model-paths` config, for example, states that models in this project can be
+# found in the "models/" directory. You probably won't need to change these!
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"  # directory which will store compiled SQL files
+clean-targets:         # directories to be removed by `dbt clean`
+  - "target"
+  - "dbt_packages"
+
+# Configuring models
+# Full documentation: https://docs.getdbt.com/docs/configuring-models
+
+models:
+  hiscox_etl:
+    # Config indicated by + and applies to all files under models/example/
+    bronze:
+      +materialized: table
+      +file_format: delta
+      +location_root: "/mnt/delta/bronze"
+      +tags: ["bronze", "raw"]
+    silver:
+      +materialized: table
+      +file_format: delta
+      +location_root: "/mnt/delta/silver"
+      +tags: ["silver", "cleaned"]
+    gold:
+      +materialized: table
+      +file_format: delta
+      +location_root: "/mnt/delta/gold"
+      +tags: ["gold", "aggregated"]
+
+# Snapshot configurations
+snapshots:
+  hiscox_etl:
+    +target_schema: snapshots
+    +strategy: timestamp
+    +updated_at: updated_at
+
+# Seed configurations
+seeds:
+  hiscox_etl:
+    +file_format: delta
+
+# Test configurations
+tests:
+  +store_failures: true
+  +schema: test_failures
+
+# Documentation
+docs:
+  +node_color: "#2E8B57"  # Sea Green for Hiscox branding
+
+# Variables
+vars:
+  # The `start_date` variable will be accessible in all resources
+  start_date: '2020-01-01'
+  end_date: '2024-12-31'
+  
+  # Data quality thresholds
+  data_quality:
+    max_null_percentage: 0.05  # 5% max null values
+    min_row_count: 100
+    max_duplicate_percentage: 0.01  # 1% max duplicates
+  
+  # Business logic variables
+  business_rules:
+    min_claim_amount: 0
+    max_claim_amount: 10000000  # 10M max claim
+    valid_policy_types: ['AUTO', 'HOME', 'LIFE', 'HEALTH', 'BUSINESS']
+    valid_claim_statuses: ['OPEN', 'CLOSED', 'PENDING', 'REJECTED']
+
+# Hooks
+on-run-start:
+  - "{{ log('Starting dbt run for Hiscox ETL pipeline', info=true) }}"
+  - "CREATE SCHEMA IF NOT EXISTS {{ target.schema }}_bronze"
+  - "CREATE SCHEMA IF NOT EXISTS {{ target.schema }}_silver"
+  - "CREATE SCHEMA IF NOT EXISTS {{ target.schema }}_gold"
+
+on-run-end:
+  - "{{ log('Completed dbt run for Hiscox ETL pipeline', info=true) }}"
+  - "ANALYZE TABLE {{ target.schema }}_gold.claims_summary COMPUTE STATISTICS"
+
+# Dispatch configuration for cross-database compatibility
+dispatch:
+  - macro_namespace: dbt_utils
+    search_order: ['spark_utils', 'dbt_utils']
+
+# Quoting configuration
+quoting:
+  database: false
+  schema: false
+  identifier: false
