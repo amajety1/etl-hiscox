@@ -1,0 +1,276 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      skip_staging:
+        description: 'Skip staging deployment'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TERRAFORM_VERSION: 1.5.0
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    environment: staging
+    if: ${{ !inputs.skip_staging }}
+    outputs:
+      databricks_url: ${{ steps.terraform-outputs.outputs.databricks_url }}
+      storage_account: ${{ steps.terraform-outputs.outputs.storage_account }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS_STAGING }}
+          
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+          
+      - name: Deploy Infrastructure
+        run: |
+          cd terraform/environments/staging
+          terraform init
+          terraform plan -out=tfplan
+          terraform apply -auto-approve tfplan
+          
+      - name: Capture Terraform Outputs
+        id: terraform-outputs
+        run: |
+          cd terraform/environments/staging
+          echo "databricks_url=$(terraform output -raw databricks_workspace_url)" >> $GITHUB_OUTPUT
+          echo "storage_account=$(terraform output -raw storage_account_name)" >> $GITHUB_OUTPUT
+          
+      - name: Build and Push Images
+        run: |
+          az acr login --name acrhiscoxetlstaging001am
+          
+          docker build -t acrhiscoxetlstaging001am.azurecr.io/etl-ingestion:${{ github.sha }} -f docker/ingestion.Dockerfile .
+          docker build -t acrhiscoxetlstaging001am.azurecr.io/etl-transformation:${{ github.sha }} -f docker/transformation.Dockerfile .
+          
+          docker push acrhiscoxetlstaging001am.azurecr.io/etl-ingestion:${{ github.sha }}
+          docker push acrhiscoxetlstaging001am.azurecr.io/etl-transformation:${{ github.sha }}
+          
+      - name: Run Staging Tests
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-minimal.txt
+          pip install pytest
+          pytest tests/integration/ -v --env=staging
+        env:
+          DATABRICKS_HOST: ${{ steps.terraform-outputs.outputs.databricks_url }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_STAGING }}
+
+  approval-gate:
+    name: Production Approval
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment: production-approval
+    if: always() && (needs.deploy-staging.result == 'success' || inputs.skip_staging)
+    steps:
+      - name: Manual Approval Required
+        run: |
+          echo "🚨 Production deployment requires manual approval"
+          echo "Staging tests: ${{ needs.deploy-staging.result }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Actor: ${{ github.actor }}"
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, approval-gate]
+    environment: production
+    if: always() && (needs.approval-gate.result == 'success')
+    strategy:
+      matrix:
+        region: [eastus, westus2]
+        include:
+          - region: eastus
+            primary: true
+            acr_name: acrhiscoxetlprod001am
+          - region: westus2
+            primary: false
+            acr_name: acrhiscoxetlprod002am
+    outputs:
+      primary_databricks_url: ${{ steps.terraform-outputs.outputs.databricks_url }}
+      primary_storage_account: ${{ steps.terraform-outputs.outputs.storage_account }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+          
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+          
+      - name: Deploy Infrastructure - ${{ matrix.region }}
+        run: |
+          cd terraform/environments/production
+          terraform init
+          terraform workspace select ${{ matrix.region }} || terraform workspace new ${{ matrix.region }}
+          terraform plan -var="location=${{ matrix.region }}" -var="is_primary=${{ matrix.primary }}" -out=tfplan
+          terraform apply -auto-approve tfplan
+          
+      - name: Capture Terraform Outputs
+        id: terraform-outputs
+        if: matrix.primary
+        run: |
+          cd terraform/environments/production
+          echo "databricks_url=$(terraform output -raw databricks_workspace_url)" >> $GITHUB_OUTPUT
+          echo "storage_account=$(terraform output -raw storage_account_name)" >> $GITHUB_OUTPUT
+          
+      - name: Blue-Green Deployment
+        run: |
+          # Login to ACR
+          az acr login --name ${{ matrix.acr_name }}
+          
+          # Pull images from staging
+          docker pull acrhiscoxetlstaging001am.azurecr.io/etl-ingestion:${{ github.sha }}
+          docker pull acrhiscoxetlstaging001am.azurecr.io/etl-transformation:${{ github.sha }}
+          
+          # Tag for production
+          docker tag acrhiscoxetlstaging001am.azurecr.io/etl-ingestion:${{ github.sha }} ${{ matrix.acr_name }}.azurecr.io/etl-ingestion:${{ github.sha }}
+          docker tag acrhiscoxetlstaging001am.azurecr.io/etl-transformation:${{ github.sha }} ${{ matrix.acr_name }}.azurecr.io/etl-transformation:${{ github.sha }}
+          
+          # Push to production ACR
+          docker push ${{ matrix.acr_name }}.azurecr.io/etl-ingestion:${{ github.sha }}
+          docker push ${{ matrix.acr_name }}.azurecr.io/etl-transformation:${{ github.sha }}
+          
+          # Update production tags
+          docker tag ${{ matrix.acr_name }}.azurecr.io/etl-ingestion:${{ github.sha }} ${{ matrix.acr_name }}.azurecr.io/etl-ingestion:latest
+          docker tag ${{ matrix.acr_name }}.azurecr.io/etl-transformation:${{ github.sha }} ${{ matrix.acr_name }}.azurecr.io/etl-transformation:latest
+          
+          docker push ${{ matrix.acr_name }}.azurecr.io/etl-ingestion:latest
+          docker push ${{ matrix.acr_name }}.azurecr.io/etl-transformation:latest
+
+  production-smoke-tests:
+    name: Production Smoke Tests
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-minimal.txt
+          pip install pytest
+          
+      - name: Run smoke tests
+        run: |
+          pytest tests/smoke/ -v --env=production
+        env:
+          DATABRICKS_HOST: ${{ needs.deploy-production.outputs.primary_databricks_url }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_PROD }}
+          
+      - name: Health check
+        run: |
+          python scripts/monitoring/health_check.py --environment production
+        env:
+          AZURE_STORAGE_ACCOUNT_NAME: ${{ needs.deploy-production.outputs.primary_storage_account }}
+
+  rollback-on-failure:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: [deploy-production, production-smoke-tests]
+    if: failure()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+          
+      - name: Get previous successful deployment
+        id: get-previous
+        run: |
+          # Get the previous successful deployment tag
+          PREVIOUS_TAG=$(az acr repository show-tags --name acrhiscoxetlprod001am --repository etl-ingestion --orderby time_desc --output tsv | head -2 | tail -1)
+          echo "previous_tag=$PREVIOUS_TAG" >> $GITHUB_OUTPUT
+          
+      - name: Rollback deployment
+        run: |
+          ./deployment/rollback.sh production ${{ steps.get-previous.outputs.previous_tag }}
+
+  notify-production-deployment:
+    name: Notify Production Deployment
+    runs-on: ubuntu-latest
+    needs: [deploy-production, production-smoke-tests]
+    if: always()
+    steps:
+      - name: Notify Slack - Success
+        if: needs.production-smoke-tests.result == 'success'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          channel: '#data-engineering'
+          text: |
+            🎉 Production deployment successful!
+            Environment: Production (Multi-region)
+            Commit: ${{ github.sha }}
+            Actor: ${{ github.actor }}
+            Databricks URL: ${{ needs.deploy-production.outputs.primary_databricks_url }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          
+      - name: Notify Slack - Failure
+        if: needs.production-smoke-tests.result == 'failure'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          channel: '#data-engineering'
+          text: |
+            🚨 Production deployment failed!
+            Environment: Production
+            Commit: ${{ github.sha }}
+            Actor: ${{ github.actor }}
+            Rollback initiated automatically.
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          
+      - name: Create GitHub Release
+        if: needs.production-smoke-tests.result == 'success'
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ github.run_number }}
+          release_name: Release v${{ github.run_number }}
+          body: |
+            ## Production Deployment v${{ github.run_number }}
+            
+            **Commit:** ${{ github.sha }}
+            **Deployed by:** ${{ github.actor }}
+            **Databricks URL:** ${{ needs.deploy-production.outputs.primary_databricks_url }}
+            
+            ### Changes
+            - Automated deployment from main branch
+            - All tests passed successfully
+            - Multi-region deployment completed
+          draft: false
+          prerelease: false
